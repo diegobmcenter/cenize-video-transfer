@@ -1,117 +1,223 @@
-name: Process Cenize Video
+name: Process Cenize Videos
 
 on:
+  release:
+    types: [published, edited]
+
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  process-video:
+  process-videos:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 120
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Install tools
         run: |
           sudo apt-get update
           sudo apt-get install -y p7zip-full ffmpeg jq
 
-      - name: Find latest Cenize video
-        id: video
-        run: |
-          API="https://api.github.com/repos/diegobmcenter/cenize-video-transfer/releases/tags/videos-001"
-
-          curl -L --fail "$API" -o release.json
-
-          ASSET_URL=$(jq -r '
-            [.assets[] | select(.name | endswith(".7z"))]
-            | sort_by(.created_at)
-            | last
-            | .browser_download_url
-          ' release.json)
-
-          ASSET_NAME=$(jq -r '
-            [.assets[] | select(.name | endswith(".7z"))]
-            | sort_by(.created_at)
-            | last
-            | .name
-          ' release.json)
-
-          if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then
-            echo "Nenhum arquivo .7z encontrado na Release." >&2
-            exit 1
-          fi
-
-          echo "Arquivo encontrado: $ASSET_NAME"
-          echo "asset_name=$ASSET_NAME" >> "$GITHUB_OUTPUT"
-
-          curl -L --fail --retry 3 \
-            "$ASSET_URL" \
-            -o cenize-video.7z
-
-      - name: Extract encrypted archive
+      - name: Find and process new videos
+        id: batch
         env:
           VIDEO_PASSWORD: ${{ secrets.VIDEO_PASSWORD }}
         run: |
-          mkdir -p extracted
-          7z x -y -p"$VIDEO_PASSWORD" -oextracted cenize-video.7z
-          find extracted -maxdepth 3 -type f -printf '%p\n'
-
-      - name: Build analysis package
-        run: |
           set -e
 
-          VIDEO="$(find extracted -type f \( \
-            -iname '*.mp4' -o \
-            -iname '*.mkv' -o \
-            -iname '*.mov' -o \
-            -iname '*.avi' -o \
-            -iname '*.webm' \
-          \) | head -n 1)"
+          mkdir -p .cenize
+          touch .cenize/processed-assets.txt
 
-          if [ -z "$VIDEO" ]; then
-            echo "Nenhum vídeo encontrado." >&2
-            exit 1
-          fi
+          mkdir -p analysis
+          : > processed-this-run.txt
 
-          mkdir -p analysis/frames analysis/scenes
+          curl -L --fail \
+            "https://api.github.com/repos/diegobmcenter/cenize-video-transfer/releases/tags/videos-001" \
+            -o release.json
 
-          ffprobe -v error \
-            -show_format \
-            -show_streams \
-            "$VIDEO" > analysis/metadata.txt
+          jq -r '
+            .assets[]
+            | select(.name | endswith(".7z"))
+            | [.id, .name, .browser_download_url]
+            | @tsv
+          ' release.json > assets.tsv
 
-          ffmpeg -hide_banner -loglevel error \
-            -i "$VIDEO" \
-            -vf "fps=1,scale='min(1280,iw)':-2" \
-            -q:v 4 \
-            analysis/frames/frame_%06d.jpg
+          COUNT=0
 
-          ffmpeg -hide_banner -loglevel error \
-            -i "$VIDEO" \
-            -vf "select='gt(scene,0.08)',scale='min(1280,iw)':-2" \
-            -vsync vfr \
-            -q:v 3 \
-            analysis/scenes/scene_%06d.jpg || true
+          while IFS=$'\t' read -r ASSET_ID ASSET_NAME ASSET_URL
+          do
+            if grep -qx "$ASSET_ID" .cenize/processed-assets.txt; then
+              echo "Já processado: $ASSET_NAME"
+              continue
+            fi
 
-          ffmpeg -hide_banner -loglevel error \
-            -i "$VIDEO" \
-            -vn \
-            -codec:a libmp3lame \
-            -b:a 64k \
-            analysis/audio.mp3 || true
+            echo "======================================"
+            echo "PROCESSANDO: $ASSET_NAME"
+            echo "======================================"
 
-          printf 'Arquivo: %s\n' "${{ steps.video.outputs.asset_name }}" \
-            > analysis/README.txt
+            SLUG="$(printf '%s' "$ASSET_NAME" \
+              | sed 's/\.7z$//' \
+              | sed 's/[^A-Za-z0-9._-]/_/g')"
 
-          printf 'Frames: 1 por segundo\nScene threshold: 0.08\n' \
-            >> analysis/README.txt
+            rm -rf extracted
+            mkdir -p extracted
+            mkdir -p "analysis/$SLUG/frames"
+            mkdir -p "analysis/$SLUG/scenes"
 
-      - name: Upload analysis artifact
+            curl -L --fail --retry 3 \
+              "$ASSET_URL" \
+              -o cenize-video.7z
+
+            7z x \
+              -y \
+              -p"$VIDEO_PASSWORD" \
+              -oextracted \
+              cenize-video.7z
+
+            VIDEO="$(find extracted -type f \( \
+              -iname '*.mp4' -o \
+              -iname '*.mkv' -o \
+              -iname '*.mov' -o \
+              -iname '*.avi' -o \
+              -iname '*.webm' \
+            \) | head -n 1)"
+
+            if [ -z "$VIDEO" ]; then
+              echo "Nenhum vídeo encontrado em $ASSET_NAME"
+              exit 1
+            fi
+
+            ffprobe \
+              -v error \
+              -show_format \
+              -show_streams \
+              "$VIDEO" \
+              > "analysis/$SLUG/metadata.txt"
+
+            ffmpeg \
+              -hide_banner \
+              -loglevel error \
+              -i "$VIDEO" \
+              -vf "fps=1,scale='min(1280,iw)':-2" \
+              -q:v 4 \
+              "analysis/$SLUG/frames/frame_%06d.jpg"
+
+            ffmpeg \
+              -hide_banner \
+              -loglevel error \
+              -i "$VIDEO" \
+              -vf "select='gt(scene,0.08)',scale='min(1280,iw)':-2" \
+              -vsync vfr \
+              -q:v 3 \
+              "analysis/$SLUG/scenes/scene_%06d.jpg" \
+              || true
+
+            ffmpeg \
+              -hide_banner \
+              -loglevel error \
+              -i "$VIDEO" \
+              -vn \
+              -codec:a libmp3lame \
+              -b:a 64k \
+              "analysis/$SLUG/audio.mp3" \
+              || true
+
+            {
+              echo "Arquivo: $ASSET_NAME"
+              echo "Asset ID: $ASSET_ID"
+              echo "Frames: 1 por segundo"
+              echo "Scene threshold: 0.08"
+            } > "analysis/$SLUG/README.txt"
+
+            echo "$ASSET_ID" >> .cenize/processed-assets.txt
+
+            printf '%s\t%s\n' \
+              "$ASSET_ID" \
+              "$ASSET_NAME" \
+              >> processed-this-run.txt
+
+            COUNT=$((COUNT + 1))
+          done < assets.tsv
+
+          sort -u \
+            .cenize/processed-assets.txt \
+            -o .cenize/processed-assets.txt
+
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          videos = []
+
+          p = Path("processed-this-run.txt")
+
+          if p.exists():
+              for line in p.read_text(
+                  encoding="utf-8"
+              ).splitlines():
+
+                  if not line.strip():
+                      continue
+
+                  asset_id, name = line.split(
+                      "\t",
+                      1
+                  )
+
+                  videos.append({
+                      "asset_id": int(asset_id),
+                      "name": name
+                  })
+
+          data = {
+              "run_id": int(
+                  os.environ["GITHUB_RUN_ID"]
+              ),
+              "videos": videos,
+              "count": len(videos)
+          }
+
+          Path(
+              ".cenize/latest-run.json"
+          ).write_text(
+              json.dumps(
+                  data,
+                  ensure_ascii=False,
+                  indent=2
+              ),
+              encoding="utf-8"
+          )
+          PY
+
+      - name: Upload batch analysis
+        if: steps.batch.outputs.count != '0'
         uses: actions/upload-artifact@v4
         with:
-          name: cenize-video-analysis
+          name: cenize-batch-analysis-${{ github.run_id }}
           path: analysis/
           retention-days: 1
           compression-level: 6
+
+      - name: Save processing status
+        if: steps.batch.outputs.count != '0'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add \
+            .cenize/processed-assets.txt \
+            .cenize/latest-run.json
+
+          git commit \
+            -m "Track processed Cenize videos" \
+            || true
+
+          git push
