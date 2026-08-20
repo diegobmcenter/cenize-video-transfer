@@ -1,0 +1,110 @@
+name: Transfer Cenize Code
+
+on:
+  push:
+    paths:
+      - '.github/workflows/transfer-cenize-code.yml'
+
+  release:
+    types: [published, edited]
+
+  schedule:
+    - cron: '*/5 * * * *'
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  transfer-code:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Find latest Cenize ZIP
+        id: transfer
+        run: |
+          set -euo pipefail
+
+          mkdir -p .cenize
+          mkdir -p transfer
+          touch .cenize/transferred-code-assets.txt
+
+          curl -L --fail --retry 3 \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/videos-001" \
+            -o release.json
+
+          jq -r '
+            [
+              .assets[]
+              | select(
+                  (.name | startswith("Cenize_Mobile_"))
+                  and
+                  (.name | endswith(".zip"))
+                )
+            ]
+            | sort_by(.updated_at)
+            | last
+            | select(. != null)
+            | [.id, .name, .browser_download_url]
+            | @tsv
+          ' release.json > latest-code.tsv
+
+          if [ ! -s latest-code.tsv ]; then
+            echo "Nenhum ZIP do Cenize encontrado."
+            echo "count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          IFS=$'\t' read -r ASSET_ID ASSET_NAME ASSET_URL < latest-code.tsv
+
+          echo "Encontrado: $ASSET_NAME"
+          echo "Asset ID: $ASSET_ID"
+
+          if grep -qx "$ASSET_ID" .cenize/transferred-code-assets.txt; then
+            echo "ZIP já transferido anteriormente."
+            echo "count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          curl -L --fail --retry 3 \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            "$ASSET_URL" \
+            -o "transfer/$ASSET_NAME"
+
+          echo "$ASSET_ID" >> .cenize/transferred-code-assets.txt
+
+          sort -u \
+            .cenize/transferred-code-assets.txt \
+            -o .cenize/transferred-code-assets.txt
+
+          echo "count=1" >> "$GITHUB_OUTPUT"
+          echo "filename=$ASSET_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Cenize ZIP
+        if: steps.transfer.outputs.count == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cenize-code-${{ github.run_id }}
+          path: transfer/*.zip
+          retention-days: 30
+          compression-level: 0
+
+      - name: Save transferred ZIP status
+        if: steps.transfer.outputs.count == '1'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add .cenize/transferred-code-assets.txt
+
+          git commit \
+            -m "Track transferred Cenize code" \
+            || true
+
+          git push
