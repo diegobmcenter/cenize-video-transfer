@@ -1,9 +1,6 @@
 name: Process Cenize Video
 
 on:
-  push:
-    paths:
-      - '.github/workflows/process-video.yml'
   workflow_dispatch:
 
 permissions:
@@ -18,12 +15,39 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y p7zip-full ffmpeg
+          sudo apt-get install -y p7zip-full ffmpeg jq
 
-      - name: Download encrypted release asset
+      - name: Find latest Cenize video
+        id: video
         run: |
+          API="https://api.github.com/repos/diegobmcenter/cenize-video-transfer/releases/tags/videos-001"
+
+          curl -L --fail "$API" -o release.json
+
+          ASSET_URL=$(jq -r '
+            [.assets[] | select(.name | endswith(".7z"))]
+            | sort_by(.created_at)
+            | last
+            | .browser_download_url
+          ' release.json)
+
+          ASSET_NAME=$(jq -r '
+            [.assets[] | select(.name | endswith(".7z"))]
+            | sort_by(.created_at)
+            | last
+            | .name
+          ' release.json)
+
+          if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then
+            echo "Nenhum arquivo .7z encontrado na Release." >&2
+            exit 1
+          fi
+
+          echo "Arquivo encontrado: $ASSET_NAME"
+          echo "asset_name=$ASSET_NAME" >> "$GITHUB_OUTPUT"
+
           curl -L --fail --retry 3 \
-            'https://github.com/diegobmcenter/cenize-video-transfer/releases/download/videos-001/01-Ordem-de-Servico.7z' \
+            "$ASSET_URL" \
             -o cenize-video.7z
 
       - name: Extract encrypted archive
@@ -47,7 +71,7 @@ jobs:
           \) | head -n 1)"
 
           if [ -z "$VIDEO" ]; then
-            echo "No video file found after extraction." >&2
+            echo "Nenhum vídeo encontrado." >&2
             exit 1
           fi
 
@@ -78,15 +102,16 @@ jobs:
             -b:a 64k \
             analysis/audio.mp3 || true
 
-          printf 'Source: %s\n' "$VIDEO" > analysis/README.txt
-          printf 'Frames: 1 per second\nScene threshold: 0.08\n' >> analysis/README.txt
+          printf 'Arquivo: %s\n' "${{ steps.video.outputs.asset_name }}" \
+            > analysis/README.txt
 
-          du -sh analysis
+          printf 'Frames: 1 por segundo\nScene threshold: 0.08\n' \
+            >> analysis/README.txt
 
-      - name: Upload temporary analysis artifact
+      - name: Upload analysis artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cenize-os-analysis
+          name: cenize-video-analysis
           path: analysis/
           retention-days: 1
           compression-level: 6
