@@ -9,7 +9,7 @@ on:
     types: [published, edited]
 
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '*/5 * * * *'
 
   workflow_dispatch:
 
@@ -107,6 +107,7 @@ jobs:
               > "analysis/$SLUG/metadata.txt"
 
             ffmpeg \
+              -nostdin \
               -hide_banner \
               -loglevel error \
               -i "$VIDEO" \
@@ -115,6 +116,7 @@ jobs:
               "analysis/$SLUG/frames/frame_%06d.jpg"
 
             ffmpeg \
+              -nostdin \
               -hide_banner \
               -loglevel error \
               -i "$VIDEO" \
@@ -125,6 +127,7 @@ jobs:
               || true
 
             ffmpeg \
+              -nostdin \
               -hide_banner \
               -loglevel error \
               -i "$VIDEO" \
@@ -210,7 +213,7 @@ jobs:
         with:
           name: cenize-batch-analysis-${{ github.run_id }}
           path: analysis/
-          retention-days: 1
+          retention-days: 7
           compression-level: 6
 
       - name: Save processing status
