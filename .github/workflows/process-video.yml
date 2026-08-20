@@ -1,8 +1,15 @@
 name: Process Cenize Videos
 
 on:
+  push:
+    paths:
+      - '.github/workflows/process-video.yml'
+
   release:
     types: [published, edited]
+
+  schedule:
+    - cron: '*/30 * * * *'
 
   workflow_dispatch:
 
